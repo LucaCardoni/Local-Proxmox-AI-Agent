@@ -103,7 +103,11 @@ def _validate_settings(values: dict[str, Any]) -> None:
             )
 
 
-def load_settings(config_path: str | Path | None = None) -> tuple[dict[str, Any], Path]:
+def load_settings(
+    config_path: str | Path | None = None,
+    *,
+    apply_env_overrides: bool = True,
+) -> tuple[dict[str, Any], Path]:
     """Load TOML settings and legacy environment overrides.
 
     Relative model paths are resolved against the configuration file's directory
@@ -119,11 +123,12 @@ def load_settings(config_path: str | Path | None = None) -> tuple[dict[str, Any]
         raise ValueError(f"invalid TOML in {path}: {exc}") from exc
 
     _validate_settings(values)
-    for name, (section, key, converter) in ENV_OVERRIDES.items():
-        if name in os.environ:
-            try:
-                values[section][key] = converter(os.environ[name])
-            except ValueError as exc:
-                raise ValueError(f"invalid {name}: {exc}") from exc
+    if apply_env_overrides:
+        for name, (section, key, converter) in ENV_OVERRIDES.items():
+            if name in os.environ:
+                try:
+                    values[section][key] = converter(os.environ[name])
+                except ValueError as exc:
+                    raise ValueError(f"invalid {name}: {exc}") from exc
     _validate_settings(values)
     return values, path

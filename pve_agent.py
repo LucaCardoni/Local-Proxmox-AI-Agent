@@ -44,6 +44,7 @@ class Config:
     context_detection_timeout: int
     memory_min_tokens: int
     memory_max_tokens: int
+    approval_granted: bool = False
     confirm: bool = True
     dry_run: bool = False
     verbose: bool = False
@@ -139,6 +140,8 @@ def confirm(cfg: Config, desc: str, command: str, level: str) -> bool:
     if cfg.dry_run:
         print(f"\n[dry-run] {desc}\n  $ {command}")
         return False
+    if cfg.approval_granted:
+        return True
     if level == "safe" and not cfg.confirm:
         return True
     if level == "safe":

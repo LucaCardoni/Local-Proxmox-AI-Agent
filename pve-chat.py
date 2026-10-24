@@ -7,6 +7,7 @@ shows every tool call, confirms dangerous commands inline.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -628,7 +629,9 @@ def run_turn(cfg: Config, messages: list[dict]) -> str | None:
             elif cfg.dry_run:
                 result = f"[dry-run] would run: {cmd}"
             else:
-                result = TOOL_IMPLS[tool](cfg, args)
+                result = TOOL_IMPLS[tool](
+                    replace(cfg, approval_granted=True), args
+                )
             seen[key] = result
 
             _last_tool.clear()

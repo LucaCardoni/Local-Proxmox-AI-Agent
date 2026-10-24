@@ -22,7 +22,6 @@ from pathlib import Path
 
 from pve_config import load_settings
 from prompt_toolkit import PromptSession
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -1611,8 +1610,9 @@ def run_chat_session(
 
     session = PromptSession(
         history=FileHistory(str(HISTORY_PATH)),
-        auto_suggest=AutoSuggestFromHistory(),
+        auto_suggest=None,
         completer=SLASH_COMPLETER,
+        complete_while_typing=False,
         style=STYLE,
         bottom_toolbar=lambda: bottom_toolbar(cfg, messages),
         erase_when_done=True,

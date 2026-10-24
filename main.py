@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the local OpenAI-compatible API server, with or without the chat UI."""
+"""Start the local API server, terminal chat, or command-line Proxmox agent."""
 from __future__ import annotations
 
 import argparse
@@ -27,11 +27,13 @@ def _choose_mode() -> str:
     console.print(
         Panel(
             "[bold #e56f00]PVE-Chat[/bold #e56f00]\n"
-            "[#808080]Choose how you want to run the local model[/#808080]\n\n"
+            "[#808080]Choose how you want to run the local model (Ctrl+C to exit)[/#808080]\n\n"
             "[bold]1[/bold]  API server only  [#808080]· connect with any "
             "OpenAI-compatible client[/#808080]\n"
             "[bold]2[/bold]  API server + chat  [#808080]· start the server "
-            "and open the terminal chat[/#808080]",
+            "and open the terminal chat[/#808080]\n"
+            "[bold]3[/bold]  Command-line agent  [#808080]· issue Proxmox "
+            "commands without the chat UI[/#808080]",
             title="Proxmox AI",
             border_style=ORANGE,
             padding=(1, 2),
@@ -39,7 +41,7 @@ def _choose_mode() -> str:
     )
     while True:
         try:
-            choice = console.input(Text("❯ ", style=f"bold {ORANGE}") + "Choose 1 or 2 [2]: ").strip()
+            choice = console.input(Text("❯ ", style=f"bold {ORANGE}") + "Choose 1, 2, or 3 [2]: ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[#808080]Cancelled.[/]")
             return "cancel"
@@ -47,7 +49,9 @@ def _choose_mode() -> str:
             return "with-chat"
         if choice == "1":
             return "server-only"
-        console.print("[yellow]Please enter 1 or 2.[/]")
+        if choice == "3":
+            return "agent"
+        console.print("[yellow]Please enter 1, 2, or 3.[/]")
 
 
 def _client_url(host: str, port: int) -> str:
@@ -136,11 +140,13 @@ def _run_server_only(
         return 130
 
 
-def _run_with_chat(
+def _run_with_client(
     script_dir: Path,
     config_path: Path,
     settings: dict,
     startup_timeout: float,
+    client_command: list[str],
+    client_name: str,
 ) -> int:
     server = settings["server"]
     api_url = _client_url(server["host"], server["port"])
@@ -150,18 +156,10 @@ def _run_with_chat(
         "--config",
         str(config_path),
     ]
-    client_command = [
-        sys.executable,
-        str(script_dir / "pve-chat.py"),
-        "--config",
-        str(config_path),
-        "--base-url",
-        api_url,
-    ]
 
     console.print(
         Panel.fit(
-            "[bold #e56f00]Starting model server and chat[/]\n"
+            f"[bold #e56f00]Starting model server and {client_name}[/]\n"
             f"[#808080]API endpoint[/] [bold]{api_url}[/]",
             border_style=ORANGE,
         )
@@ -183,7 +181,7 @@ def _run_with_chat(
             )
             return process.returncode or 1
 
-        console.print("[green]API ready; starting chat.[/]")
+        console.print(f"[green]API ready; starting {client_name}.[/]")
         return subprocess.call(client_command, cwd=script_dir)
     except KeyboardInterrupt:
         console.print("\n[#808080]Interrupted.[/]")
@@ -194,6 +192,48 @@ def _run_with_chat(
     finally:
         if process is not None:
             _stop_server(process)
+
+
+def _run_with_chat(
+    script_dir: Path,
+    config_path: Path,
+    settings: dict,
+    startup_timeout: float,
+) -> int:
+    api_url = _client_url(settings["server"]["host"], settings["server"]["port"])
+    client_command = [
+        sys.executable,
+        str(script_dir / "pve-chat.py"),
+        "--config",
+        str(config_path),
+        "--base-url",
+        api_url,
+    ]
+    return _run_with_client(
+        script_dir, config_path, settings, startup_timeout,
+        client_command, "chat",
+    )
+
+
+def _run_with_agent(
+    script_dir: Path,
+    config_path: Path,
+    settings: dict,
+    startup_timeout: float,
+) -> int:
+    api_url = _client_url(settings["server"]["host"], settings["server"]["port"])
+    client_command = [
+        sys.executable,
+        str(script_dir / "pve_agent.py"),
+        "--config",
+        str(config_path),
+        "--base-url",
+        api_url,
+    ]
+    return _run_with_client(
+        script_dir, config_path, settings, startup_timeout,
+        client_command, "command-line agent",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -209,6 +249,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start the API server and then launch the terminal chat",
     )
+    mode.add_argument(
+        "--agent",
+        action="store_true",
+        help="start the API server and then launch the command-line agent",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -219,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         "--startup-timeout",
         type=float,
         default=300,
-        help="seconds to wait for the API to become ready with --with-chat",
+        help="seconds to wait for the API with --with-chat or --agent",
     )
     args = parser.parse_args(argv)
     if args.startup_timeout <= 0:
@@ -229,13 +274,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings, _ = load_settings(config_path)
     except ValueError as exc:
-        parser.error(str(exc))
+        parser.error(f"{exc}\nRun `python3 setup_config.py` to create config.toml.")
 
     script_dir = Path(__file__).resolve().parent
     if args.server_only:
         selected_mode = "server-only"
     elif args.with_chat:
         selected_mode = "with-chat"
+    elif args.agent:
+        selected_mode = "agent"
     else:
         selected_mode = _choose_mode()
 
@@ -243,6 +290,10 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     if selected_mode == "server-only":
         return _run_server_only(script_dir, config_path, settings)
+    if selected_mode == "agent":
+        return _run_with_agent(
+            script_dir, config_path, settings, args.startup_timeout
+        )
     return _run_with_chat(script_dir, config_path, settings, args.startup_timeout)
 
 

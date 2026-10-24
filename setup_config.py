@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from pve_config import DEFAULT_CONFIG_PATH, load_settings
+from pve_config import DEFAULT_CONFIG_PATH, EXAMPLE_CONFIG_PATH, load_settings
 from hardware_tuning import tune_settings
 
 
@@ -430,7 +430,8 @@ def main(argv: list[str] | None = None) -> int:
     config_path = args.config.expanduser().resolve()
 
     try:
-        settings, _ = load_settings(config_path, apply_env_overrides=False)
+        seed_path = config_path if config_path.is_file() else EXAMPLE_CONFIG_PATH
+        settings, _ = load_settings(seed_path, apply_env_overrides=False)
     except ValueError as exc:
         parser.error(str(exc))
 

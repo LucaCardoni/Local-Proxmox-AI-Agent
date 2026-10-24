@@ -146,7 +146,10 @@ def confirm(cfg: Config, desc: str, command: str, level: str) -> bool:
         return True
     if level == "safe":
         print(f"\n  → {desc}\n    $ {command}")
-        return True
+        try:
+            return input("    Run? [y/N] ").strip().lower() in {"y", "yes"}
+        except EOFError:
+            return False
     print(f"\n⚠ DANGEROUS: {desc}\n    $ {command}")
     try:
         return input("    Type 'yes' to run: ").strip().lower() == "yes"
@@ -610,12 +613,13 @@ def run_agent(cfg: Config, user_input: str) -> None:
 
 
 def repl(cfg: Config) -> None:
-    print("pve-agent — type your request, or 'quit'.")
+    print("pve-agent — enter a request.")
+    print("Type 'quit', 'exit', or 'q' to exit. Press Ctrl+C to exit immediately.")
     print(f"  model:  {cfg.base_url} ({cfg.model})")
     print(f"  target: ssh {cfg.ssh_user}@{cfg.ssh_host}")
     while True:
         try:
-            line = input("\n> ").strip()
+            line = input("\nrequest (quit to exit)> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return

@@ -1,3 +1,8 @@
-minicpm5-2b-q4_k_m.gguf
-serve.log
-__pycache__/**
+*.gguf
+*.log
+__pycache__/
+.pve-chat/
+.pytest_cache/
+.venv/
+venv/
+config.toml

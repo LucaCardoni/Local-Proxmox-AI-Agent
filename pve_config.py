@@ -8,6 +8,7 @@ from typing import Any
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("config.toml")
+EXAMPLE_CONFIG_PATH = Path(__file__).resolve().with_name("config.example.toml")
 
 SCHEMA: dict[str, dict[str, type]] = {
     "llm": {

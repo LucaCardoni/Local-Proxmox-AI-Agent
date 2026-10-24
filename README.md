@@ -1,8 +1,19 @@
-# Local Proxmox AI Agent
+<div align="center">
 
-A local, terminal-based assistant for Proxmox VE. It runs a GGUF model through
-an OpenAI-compatible API and can answer questions or propose Proxmox actions
-over SSH. Your model and Proxmox connection settings stay on your machine.
+# PVE-Chat
+
+### Your local AI assistant for Proxmox VE
+
+Run a local GGUF model, chat from your terminal, and manage your Proxmox host
+over SSH — with your model and connection settings kept on your machine.
+
+[Get started](#install) · [Run the assistant](#run) · [Safety](#safety-and-privacy)
+
+<p align="center">
+  <img src="./screenshots/empty-chat.jpg" alt="A new PVE-Chat conversation, ready for a prompt" width="75%">
+</p>
+
+</div>
 
 ## Requirements
 
@@ -62,6 +73,13 @@ python3 main.py --with-chat
 python3 main.py --agent
 ```
 
+During a conversation, tool calls and their concise results appear together,
+so you can see what the assistant asked Proxmox to do:
+
+<p align="center">
+  <img src="./screenshots/chat-example.jpg" alt="A PVE-Chat conversation showing Proxmox container tool calls and results" width="90%">
+</p>
+
 The server's default endpoint is `http://127.0.0.1:8080/v1`; chat completions
 use `/chat/completions`. For example, while the API server is running:
 
@@ -112,14 +130,23 @@ that file directly, or use environment overrides such as `PVE_N_CTX` and
 
 ## Development
 
-Install the project and test dependencies, then run the suite:
+The automated tests are part of the repository and run in GitHub Actions for
+Python 3.11–3.13 on pushes and pull requests. To run them locally, create a
+virtual environment and install the lightweight test dependencies:
 
 ```bash
-python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install pytest rich prompt-toolkit
+python -m pytest -q
 ```
 
-The focused tests do not load a model or connect to a Proxmox host.
+No model download, GPU, Proxmox host, or full `llama-cpp-python` installation
+is needed for the test suite. To run the same syntax check as CI:
+
+```bash
+python -m compileall -q main.py pve-chat.py pve_agent.py pve_config.py serve.py setup_config.py hardware_tuning.py tests
+```
 
 ## License
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import signal
 import subprocess
 import sys
 import time
@@ -140,6 +141,15 @@ def _run_server_only(
         return 130
 
 
+def _run_client(client_command: list[str], script_dir: Path) -> int:
+    """Let the interactive client handle Ctrl+C without interrupting the launcher."""
+    previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        return subprocess.call(client_command, cwd=script_dir)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+
 def _run_with_client(
     script_dir: Path,
     config_path: Path,
@@ -165,24 +175,33 @@ def _run_with_client(
         )
     )
     process: subprocess.Popen[bytes] | None = None
+    log_path = script_dir / "serve.log"
+    log_file = None
     try:
-        process = subprocess.Popen(server_command, cwd=script_dir)
+        log_file = log_path.open("w", encoding="utf-8")
+        process = subprocess.Popen(
+            server_command,
+            cwd=script_dir,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         console.print("[#808080]Loading model; waiting for the API…[/]")
         if not _wait_until_ready(process, api_url, startup_timeout):
             if process.poll() is None:
                 console.print(
                     f"[bold red]API did not become ready within "
-                    f"{startup_timeout:g} seconds.[/]"
+                    f"{startup_timeout:g} seconds. See {log_path} for server output.[/]"
                 )
                 return 1
             console.print(
                 f"[bold red]Model server exited during startup "
-                f"(exit {process.returncode}).[/]"
+                f"(exit {process.returncode}). See {log_path} for server output.[/]"
             )
             return process.returncode or 1
 
         console.print(f"[green]API ready; starting {client_name}.[/]")
-        return subprocess.call(client_command, cwd=script_dir)
+        return _run_client(client_command, script_dir)
     except KeyboardInterrupt:
         console.print("\n[#808080]Interrupted.[/]")
         return 130
@@ -192,6 +211,8 @@ def _run_with_client(
     finally:
         if process is not None:
             _stop_server(process)
+        if log_file is not None:
+            log_file.close()
 
 
 def _run_with_chat(

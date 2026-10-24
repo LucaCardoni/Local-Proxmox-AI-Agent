@@ -544,6 +544,15 @@ def parse_action(text: str) -> dict | None:
     return None
 
 
+def normalize_answer_text(answer: str) -> str:
+    """Convert escaped line-break sequences accidentally emitted as plain text."""
+    return (
+        answer.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+    )
+
+
 # --------------------------------------------------------------------------
 # Agent loop
 # --------------------------------------------------------------------------
@@ -576,7 +585,10 @@ def run_agent(cfg: Config, user_input: str) -> None:
             continue
 
         if "answer" in action:
-            print(f"\n{action['answer']}")
+            answer = action["answer"]
+            if isinstance(answer, str):
+                answer = normalize_answer_text(answer)
+            print(f"\n{answer}")
             return
 
         tool = action.get("tool")

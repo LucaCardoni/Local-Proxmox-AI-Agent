@@ -9,10 +9,82 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
 from pve_config import DEFAULT_CONFIG_PATH, load_settings
+from hardware_tuning import tune_settings
 
 
 Input = Callable[[str], str]
+CONSOLE = Console()
+ORANGE = os.environ.get("PVE_CHAT_TITLE", "#e56f00")
+MUTED = os.environ.get("PVE_CHAT_DIM", "#808080")
+
+BANNER_ART = [
+    ("    ████▄     ▄████    ", "    KKKKK     KKKKK    "),
+    ("▄▄▄▄▄▀████▄ ▄████▀▄▄▄▄▄", "OOOOOKKKKKK KKKKKKOOOOO"),
+    (" ▀████▄▀███████▀▄████▀ ", " OOOOOOKKKKKKKKKOOOOOO "),
+    ("   ▀████▄▀███▀▄████▀   ", "   OOOOOOKKKKKOOOOOO   "),
+    ("     ████▄ ▀ ▄████▀    ", "     OOOOO K OOOOOO    "),
+    ("    ▄████▀ ▄ ▀████▄    ", "    OOOOOO K OOOOOO    "),
+    ("   ▄████▀▄███▄ ████▄   ", "   OOOOOOKKKKK OOOOO   "),
+    (" ▄████▀▄███████▄▀████▄ ", " OOOOOOKKKKKKKKKOOOOOO "),
+    ("▀▀▀▀▀▄████▀ ▀████▄▀▀▀▀▀", "OOOOOKKKKKK KKKKKKOOOOO"),
+    ("    ▀███▀     ▀███▀    ", "    KKKKK     KKKKK    "),
+]
+
+
+def _input(prompt: str) -> str:
+    return CONSOLE.input(Text("❯ ", style=f"bold {ORANGE}") + Text(prompt))
+
+
+def _say(message: str, *, style: str | None = None) -> None:
+    CONSOLE.print(Text(message, style=style))
+
+
+def _section(title: str, description: str = "") -> None:
+    body = Text(title, style=f"bold {ORANGE}")
+    if description:
+        body.append(f"\n{description}", style=MUTED)
+    CONSOLE.print(Panel.fit(body, border_style=ORANGE, padding=(0, 1)))
+
+
+def _banner(config_path: Path) -> None:
+    if CONSOLE.is_terminal:
+        CONSOLE.clear()
+    info = [
+        ("PVE-Chat Setup", f"bold {ORANGE}"),
+        ("Configure your local Proxmox AI assistant", MUTED),
+        (str(config_path), MUTED),
+        ("Enter keeps the current value", MUTED),
+        ("Ctrl+C cancels without saving", MUTED),
+    ]
+    top = max(0, (len(BANNER_ART) - len(info)) // 2)
+    for row_index, (art, colors) in enumerate(BANNER_ART):
+        row = Text()
+        run = ""
+        run_style: str | None = None
+        for char, color in zip(art, colors):
+            style = (
+                f"bold {ORANGE}" if color == "O"
+                else f"bold {MUTED}" if color == "K"
+                else None
+            )
+            if run and style != run_style:
+                row.append(run, style=run_style)
+                run = ""
+            run += char
+            run_style = style
+        if run:
+            row.append(run, style=run_style)
+        if top <= row_index < top + len(info):
+            label, style = info[row_index - top]
+            row.append("   ")
+            row.append(label, style=style)
+        CONSOLE.print(row)
+    CONSOLE.print()
 
 
 def _ask_text(
@@ -46,13 +118,13 @@ def _ask_int(
         try:
             value = int(answer)
         except ValueError:
-            print("Enter a whole number.")
+            _say("Enter a whole number.", style="yellow")
             continue
         if minimum is not None and value < minimum:
-            print(f"Enter a number greater than or equal to {minimum}.")
+            _say(f"Enter a number greater than or equal to {minimum}.", style="yellow")
             continue
         if maximum is not None and value > maximum:
-            print(f"Enter a number less than or equal to {maximum}.")
+            _say(f"Enter a number less than or equal to {maximum}.", style="yellow")
             continue
         return value
 
@@ -72,13 +144,13 @@ def _ask_float(
         try:
             value = float(answer)
         except ValueError:
-            print("Enter a number.")
+            _say("Enter a number.", style="yellow")
             continue
         if (minimum is not None and value < minimum) or (
             maximum is not None and value > maximum
         ):
             bounds = f"{minimum} to {maximum}" if maximum is not None else f"at least {minimum}"
-            print(f"Enter a value {bounds}.")
+            _say(f"Enter a value {bounds}.", style="yellow")
             continue
         return value
 
@@ -93,7 +165,7 @@ def _ask_bool(label: str, current: bool, *, input_fn: Input) -> bool:
             return True
         if answer in {"n", "no"}:
             return False
-        print("Enter yes or no.")
+        _say("Enter yes or no.", style="yellow")
 
 
 def _ask_choice(
@@ -109,14 +181,19 @@ def _ask_choice(
         if not answer:
             if current in choices:
                 return current
-            print(f"Choose one of: {options}.")
+            _say(f"Choose one of: {options}.", style="yellow")
             continue
         if answer in choices:
             return answer
-        print(f"Choose one of: {options}.")
+        _say(f"Choose one of: {options}.", style="yellow")
 
 
-def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str, Any]:
+def configure(
+    settings: dict[str, Any],
+    config_path: Path,
+    *,
+    input_fn: Input = _input,
+) -> dict[str, Any]:
     """Prompt for commonly changed values, optionally including advanced settings."""
     result = json.loads(json.dumps(settings))
     llm, ssh = result["llm"], result["ssh"]
@@ -124,8 +201,7 @@ def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str,
         result["agent"], result["chat"], result["server"]
     )
 
-    print("\nBasic settings (press Enter to keep the value in brackets).")
-    print("\nLLM connection")
+    _section("LLM connection")
     llm["base_url"] = _ask_text("OpenAI-compatible API URL", llm["base_url"], input_fn=input_fn)
     llm["model"] = _ask_text("API model name", llm["model"], input_fn=input_fn)
     llm["temperature"] = _ask_float(
@@ -133,16 +209,16 @@ def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str,
         input_fn=input_fn, minimum=0, maximum=2,
     )
 
-    print("\nProxmox SSH")
+    _section("Proxmox SSH")
     ssh["host"] = _ask_text("SSH host or alias", ssh["host"], input_fn=input_fn)
     ssh["user"] = _ask_text("SSH username", ssh["user"], input_fn=input_fn)
-    print("Host-key checking protects against connecting to an untrusted server.")
+    _say("Host-key checking protects against connecting to an untrusted server.", style=MUTED)
     ssh["strict_host_key_checking"] = _ask_choice(
         "SSH host-key checking", ssh["strict_host_key_checking"],
         ("yes", "accept-new", "no"), input_fn=input_fn,
     )
 
-    print("\nLocal model server")
+    _section("Local model server")
     server["model_path"] = _ask_text(
         "GGUF model path (relative to config.toml or absolute)",
         server["model_path"], input_fn=input_fn,
@@ -164,15 +240,48 @@ def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str,
         input_fn=input_fn,
     )
 
-    print("\nSafety")
-    print("Safe-classified commands can run without confirmation when enabled.")
+    model_path = Path(server["model_path"]).expanduser()
+    if not model_path.is_absolute():
+        model_path = config_path.parent / model_path
+    if _ask_bool(
+        "Find a suitable model configuration from this machine's hardware?",
+        model_path.is_file(),
+        input_fn=input_fn,
+    ):
+        _section("Hardware tuner", "Reads system resource info and GGUF metadata only.")
+
+        def report_tuning(message: str) -> None:
+            style = (
+                f"bold {ORANGE}" if message.startswith("Hardware-based")
+                else "yellow" if message.startswith(
+                    ("Unable to", "Could not", "Model file", "Benchmark failed")
+                )
+                else MUTED
+            )
+            _say(message, style=style)
+
+        tuned = tune_settings(
+            result,
+            config_path,
+            input_fn=input_fn,
+            report=report_tuning,
+        )
+        if tuned is not None:
+            result = tuned
+            llm, ssh = result["llm"], result["ssh"]
+            agent, chat, server = (
+                result["agent"], result["chat"], result["server"]
+            )
+
+    _section("Safety")
+    _say("Safe-classified commands can run without confirmation when enabled.", style=MUTED)
     agent["auto_confirm_safe"] = _ask_bool(
         "Automatically confirm safe commands", agent["auto_confirm_safe"],
         input_fn=input_fn,
     )
 
     if _ask_bool("Configure advanced settings too?", False, input_fn=input_fn):
-        print("\nLLM and SSH timeouts")
+        _section("LLM and SSH timeouts")
         llm["request_timeout"] = _ask_int(
             "LLM request timeout (seconds)", llm["request_timeout"],
             input_fn=input_fn, minimum=1,
@@ -190,7 +299,7 @@ def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str,
             input_fn=input_fn,
         )
 
-        print("\nAgent and chat limits")
+        _section("Agent and chat limits")
         agent["max_steps"] = _ask_int(
             "Maximum agent steps per request", agent["max_steps"],
             input_fn=input_fn, minimum=1,
@@ -228,7 +337,7 @@ def configure(settings: dict[str, Any], *, input_fn: Input = input) -> dict[str,
             input_fn=input_fn, minimum=1,
         )
 
-        print("\nAdvanced model-server tuning")
+        _section("Advanced model-server settings")
         server["model_alias"] = _ask_text(
             "Model alias (use {n_ctx} for context size)",
             server["model_alias"], input_fn=input_fn,
@@ -325,10 +434,10 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    print(f"Config file: {config_path}")
-    print("No SSH or model-server changes are made by this setup wizard.")
+    _banner(config_path)
+    _say("No SSH or model-server changes are made by this setup wizard.", style=MUTED)
     try:
-        updated = configure(settings)
+        updated = configure(settings, config_path)
         content = serialize_settings(updated)
         # Validate the complete TOML before changing the user's config.
         with tempfile.NamedTemporaryFile(
@@ -349,29 +458,28 @@ def main(argv: list[str] | None = None) -> int:
         if not _ask_bool(
             f"Save these settings to {config_path}?",
             True,
-            input_fn=input,
+            input_fn=_input,
         ):
-            print("No changes saved.")
+            _say("No changes saved.", style=MUTED)
             return 0
         write_config(config_path, content)
     except (ValueError, OSError, EOFError, KeyboardInterrupt) as exc:
         if isinstance(exc, KeyboardInterrupt):
-            print("\nSetup cancelled; config was not changed.")
+            _say("\nSetup cancelled; config was not changed.", style="yellow")
             return 130
         if isinstance(exc, EOFError):
-            print("\nInput ended; config was not changed.")
+            _say("\nInput ended; config was not changed.", style="yellow")
             return 1
-        print(f"Setup failed: {exc}")
+        _say(f"Setup failed: {exc}", style="bold red")
         return 1
 
     model_path = Path(updated["server"]["model_path"]).expanduser()
     if not model_path.is_absolute():
         model_path = config_path.parent / model_path
-    print(f"Saved settings to {config_path}")
+    _say(f"Saved settings to {config_path}", style=f"bold {ORANGE}")
     if not model_path.is_file():
-        print(f"Note: model file not found yet: {model_path}")
-    print("Start the model server with: python3 serve.py")
-    print("Start the chat client with:  python3 pve-chat.py")
+        _say(f"Note: model file not found yet: {model_path}", style="yellow")
+    _say("Run the launcher with: python3 main.py", style=MUTED)
     return 0
 
 if __name__ == "__main__":

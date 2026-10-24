@@ -91,6 +91,10 @@ def main(argv=None) -> int:
         type_k=kv_type,
         type_v=kv_type,
         flash_attn=kv_type != KV_TYPES["f16"],
+        # llama-cpp-python's server defaults logits_all=True, which allocates
+        # an n_ctx × vocabulary float32 scores array. At 131k context this can
+        # require tens of GiB. Chat completions only need the latest logits.
+        logits_all=False,
         chat_format=server["chat_format"],
         host=server["host"],
         port=server["port"],

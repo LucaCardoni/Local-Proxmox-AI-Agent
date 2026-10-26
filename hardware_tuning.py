@@ -68,16 +68,17 @@ def _ask_int(
 
 def detect_memory() -> tuple[int, int]:
     """Return (available, total) system memory in MiB."""
-    try:
-        values: dict[str, int] = {}
-        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
-            key, raw = line.split(":", 1)
-            if key in {"MemAvailable", "MemTotal"}:
-                values[key] = int(raw.split()[0]) // 1024
-        if "MemAvailable" in values and "MemTotal" in values:
-            return values["MemAvailable"], values["MemTotal"]
-    except (OSError, ValueError, IndexError):
-        pass
+    if os.name != "nt":
+        try:
+            values: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+                key, raw = line.split(":", 1)
+                if key in {"MemAvailable", "MemTotal"}:
+                    values[key] = int(raw.split()[0]) // 1024
+            if "MemAvailable" in values and "MemTotal" in values:
+                return values["MemAvailable"], values["MemTotal"]
+        except (OSError, ValueError, IndexError):
+            pass
 
     return (
         _detect_windows_memory()

@@ -4,8 +4,9 @@ import importlib.util
 import io
 import json
 import shutil
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import hardware_tuning
@@ -81,10 +82,12 @@ def test_windows_memory_detection_uses_global_memory_status() -> None:
         assert hardware_tuning._detect_windows_memory() == (768, 4096)
 
 
-def test_detect_memory_uses_windows_api_when_proc_meminfo_is_unavailable() -> None:
+def test_detect_memory_uses_windows_api_on_windows() -> None:
     with (
         patch.object(hardware_tuning.os, "name", "nt"),
-        patch.object(hardware_tuning.Path, "read_text", side_effect=OSError),
+        patch.object(
+            hardware_tuning.Path, "read_text", side_effect=OSError
+        ) as read_text,
         patch.object(
             hardware_tuning,
             "_detect_windows_memory",
@@ -93,6 +96,7 @@ def test_detect_memory_uses_windows_api_when_proc_meminfo_is_unavailable() -> No
     ):
         assert hardware_tuning.detect_memory() == (768, 4096)
 
+    read_text.assert_not_called()
     detect_windows_memory.assert_called_once_with()
 
 
@@ -209,10 +213,14 @@ def test_speed_search_chooses_fastest_without_reducing_quality_settings(
             count: gpu_layers * 10 + count for count in threads
         }
 
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.llama_cpp = SimpleNamespace(
+        llama_supports_gpu_offload=Mock(return_value=True)
+    )
     with (
-        patch(
-            "llama_cpp.llama_cpp.llama_supports_gpu_offload",
-            return_value=True,
+        patch.dict(
+            sys.modules,
+            {"llama_cpp": fake_llama_cpp},
         ),
         patch.object(
             hardware_tuning,
@@ -282,9 +290,12 @@ def test_speed_benchmark_uses_native_template_without_json_grammar(
             pass
 
     fake_model = FakeModel()
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = Mock(return_value=fake_model)
+    fake_llama_cpp.llama_chat_format = ModuleType("llama_chat_format")
     ticks = iter(index / 20 for index in range(60))
     with (
-        patch("llama_cpp.Llama", return_value=fake_model) as llama,
+        patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp}),
         patch.object(hardware_tuning.time, "perf_counter", side_effect=lambda: next(ticks)),
     ):
         rates = hardware_tuning.benchmark_thread_counts(
@@ -313,7 +324,7 @@ def test_speed_benchmark_uses_native_template_without_json_grammar(
     assert all("enable_thinking" not in call for call in fake_model.chat_calls)
     assert fake_model.native_template_kwargs == [False] * 4
     assert all(call["messages"][0]["role"] == "user" for call in fake_model.chat_calls)
-    assert llama.call_args.kwargs["chat_format"] is None
+    assert fake_llama_cpp.Llama.call_args.kwargs["chat_format"] is None
 
 
 def test_environment_overrides_apply_to_a_local_config(

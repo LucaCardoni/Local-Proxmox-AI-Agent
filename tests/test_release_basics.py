@@ -44,12 +44,15 @@ def test_server_uses_native_chat_template_and_disables_thinking(
     settings["server"]["model_path"] = str(model_path)
     settings["server"]["chat_format"] = "auto"
     config_path = tmp_path / "config.toml"
+    server_settings = Mock()
 
     with (
         patch.object(serve, "load_settings", return_value=(settings, config_path)),
-        patch.object(serve, "Settings") as server_settings,
-        patch.object(serve, "create_app"),
-        patch.object(serve.uvicorn, "run"),
+        patch.object(
+            serve,
+            "_load_server_runtime",
+            return_value=(server_settings, Mock(), SimpleNamespace(run=Mock())),
+        ),
     ):
         assert serve.main([]) == 0
 

@@ -25,10 +25,6 @@ Override with environment variables, e.g.
 import argparse
 from pathlib import Path
 
-import uvicorn
-from llama_cpp.server.app import create_app
-from llama_cpp.server.settings import Settings
-
 from pve_config import load_settings
 
 # The model's own limit (from the GGUF metadata: llama.context_length).
@@ -41,6 +37,15 @@ MODEL_MAX_CTX = 131072
 KV_TYPES = {"f16": 1, "q8_0": 8, "q4_0": 2}
 
 
+def _load_server_runtime():
+    """Load optional model-server dependencies when the server is started."""
+    import uvicorn
+    from llama_cpp.server.app import create_app
+    from llama_cpp.server.settings import Settings
+
+    return Settings, create_app, uvicorn
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="path to TOML config (default: config.toml)")
@@ -50,6 +55,7 @@ def main(argv=None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    Settings, create_app, uvicorn = _load_server_runtime()
     server = config["server"]
     kv_type_name = server["kv_type"]
     if kv_type_name not in KV_TYPES:

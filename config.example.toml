@@ -41,6 +41,6 @@ n_ubatch = 32
 n_threads = 4
 n_threads_batch = 4
 kv_type = "q8_0"
-chat_format = "chatml"
+chat_format = "auto"
 model_vram_mib = 1300
 embedding_size_estimate = 4100

@@ -454,6 +454,9 @@ For specific queries, use the matching tool directly (for example
 inside a `shell` command; tool names are pve-agent actions, not host commands.
 For a host report, call `node_status` as its own tool call. To add other
 details, make separate `shell` calls for actual host commands.
+A request for a full server, host, or node status report MUST call
+`node_status`; never claim that your capabilities are limited or that you
+cannot provide the report.
 
 Multi-step tasks work: each tool result comes back to you and you can call
 another tool. Keep each step small and verify before declaring success.
@@ -487,6 +490,9 @@ User: how are you?
 You: {{"answer": "Ready. Ask me anything — install packages, manage containers, check status."}}
 
 User: how much RAM am I using
+You: {{"tool": "node_status", "arguments": {{}}}}
+
+User: send me a full server status report
 You: {{"tool": "node_status", "arguments": {{}}}}
 
 User: how full is /

@@ -248,7 +248,10 @@ def configure(
         model_path.is_file(),
         input_fn=input_fn,
     ):
-        _section("Hardware tuner", "Reads system resource info and GGUF metadata only.")
+        _section(
+            "Hardware tuner",
+            "Estimates memory fit and can benchmark model settings for speed.",
+        )
 
         def report_tuning(message: str) -> None:
             style = (

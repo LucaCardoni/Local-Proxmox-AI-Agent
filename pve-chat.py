@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -148,23 +149,41 @@ def chat_message_panel(
     content: str,
     fg_key: str,
     bg_key: str,
+    tokens_per_second: float | None = None,
 ) -> Panel:
     """Create a compact, role-colored conversation panel."""
     if label in {"Agent", "◆ Agent"}:
         content = normalize_answer_text(content)
     style = theme_style(THEME[fg_key], THEME[bg_key])
+    subtitle = (
+        Text(f"~{tokens_per_second:.1f} tok/s", style=f"dim {THEME['dim']}")
+        if tokens_per_second is not None
+        else None
+    )
     return Panel.fit(
         Markdown(content),
         title=label,
         title_align="left",
+        subtitle=subtitle,
+        subtitle_align="right",
         border_style=style,
         style=style,
         padding=(0, 1),
     )
 
 
-def print_chat_message(label: str, content: str, fg_key: str, bg_key: str) -> None:
-    console.print(chat_message_panel(label, content, fg_key, bg_key))
+def print_chat_message(
+    label: str,
+    content: str,
+    fg_key: str,
+    bg_key: str,
+    tokens_per_second: float | None = None,
+) -> None:
+    console.print(
+        chat_message_panel(
+            label, content, fg_key, bg_key, tokens_per_second
+        )
+    )
 
 SLASH_COMPLETER = WordCompleter(
     ["/help", "/clear", "/compact", "/chats", "/memory", "/tools",
@@ -309,12 +328,16 @@ _last_tool: dict = {}      # most recent tool call, for /last
 # Streaming LLM client (SSE)
 # ─────────────────────────────────────────────────────────────
 def stream_chat(cfg: Config, messages: list[dict]):
-    """Yield ("token", str), ("error", str), or ("done", "").
+    """Yield content, estimated speed, and error events from the API stream.
 
     Tolerates three server behaviours:
       * proper SSE (data: {...}\\n\\n chunks)
       * one-shot JSON (server ignored stream:true)
       * plain error responses
+
+    Speed is estimated from non-empty content delta events. llama.cpp normally
+    emits one event per generated token, but may group bytes for some Unicode
+    tokens, so the displayed rate is approximate.
     """
     payload = {
         "model": cfg.model,
@@ -323,8 +346,6 @@ def stream_chat(cfg: Config, messages: list[dict]):
         "max_tokens": cfg.max_tokens,
         "stream": True,
         "stop": ["</s>", "<|im_end|>"],
-        "response_format": {"type": "json_object"},
-        "chat_template_kwargs": {"enable_thinking": False},
     }
     req = urllib.request.Request(
         f"{cfg.base_url.rstrip('/')}/chat/completions",
@@ -335,6 +356,35 @@ def stream_chat(cfg: Config, messages: list[dict]):
     try:
         with urllib.request.urlopen(req, timeout=cfg.request_timeout) as r:
             content_type = r.headers.get("Content-Type", "")
+            if "text/event-stream" in content_type.casefold():
+                first_token_at: float | None = None
+                last_token_at: float | None = None
+                token_count = 0
+                for raw_line in r:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    tok = delta.get("content")
+                    if tok:
+                        now = time.perf_counter()
+                        if first_token_at is None:
+                            first_token_at = now
+                        last_token_at = now
+                        token_count += 1
+                        yield ("token", tok)
+                if token_count > 1 and first_token_at is not None and last_token_at is not None:
+                    elapsed = max(last_token_at - first_token_at, 0.001)
+                    yield ("speed", (token_count - 1) / elapsed)
+                yield ("done", "")
+                return
             raw = r.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:300]
@@ -431,8 +481,25 @@ class AnswerStreamer:
         return "".join(out)
 
 
-def stream_turn(cfg: Config, messages: list[dict]) -> str:
-    """Run one model call: spinner first, then live answer text. Returns full JSON."""
+def _answer_text(value: object) -> str:
+    answer = str(value)
+    for _ in range(3):
+        nested = parse_action(answer)
+        if (
+            not isinstance(nested, dict)
+            or set(nested) != {"answer"}
+            or not isinstance(nested["answer"], str)
+        ):
+            break
+        answer = nested["answer"]
+    return answer
+
+
+def stream_turn(
+    cfg: Config,
+    messages: list[dict],
+) -> tuple[str, float | None]:
+    """Stream one model call and return its full JSON and estimated speed."""
     status = console.status(f"[{S('spinner', 'dim')}]thinking…[/]", spinner="dots")
     status.start()
     stopped = False
@@ -449,13 +516,17 @@ def stream_turn(cfg: Config, messages: list[dict]) -> str:
     extractor = AnswerStreamer()
     buf, printing = [], False
     answer_text = ""
+    tokens_per_second: float | None = None
     live: Live | None = None
     try:
         for kind, tok in stream_chat(cfg, messages):
             if kind == "error":
                 stop_status()
                 console.print(f"[{S('error')}]model error: {tok}[/]")
-                return ""
+                return "", None
+            if kind == "speed":
+                tokens_per_second = float(tok)
+                continue
             if kind == "done":
                 break
             buf.append(tok)
@@ -476,13 +547,34 @@ def stream_turn(cfg: Config, messages: list[dict]) -> str:
                 answer_text += new
                 assert live is not None
                 live.update(chat_message_panel(
-                    "Agent", answer_text, "agent_fg", "agent_bg"
+                    "Agent",
+                    answer_text,
+                    "agent_fg",
+                    "agent_bg",
+                    tokens_per_second,
                 ), refresh=True)
+        reply = "".join(buf)
+        completed_reply = parse_action(reply)
+        if isinstance(completed_reply, dict) and "answer" in completed_reply:
+            answer_text = _answer_text(completed_reply["answer"])
+        elif completed_reply is None and extractor.finished:
+            reply = json.dumps(
+                {"answer": _answer_text(answer_text)},
+                ensure_ascii=False,
+            )
     finally:
         stop_status()
         if live is not None:
+            if answer_text:
+                live.update(chat_message_panel(
+                    "Agent",
+                    answer_text,
+                    "agent_fg",
+                    "agent_bg",
+                    tokens_per_second,
+                ), refresh=True)
             live.stop()
-    return "".join(buf)
+    return reply, tokens_per_second
 
 
 # ─────────────────────────────────────────────────────────────
@@ -529,6 +621,7 @@ def tool_result_panel(
     result: str,
     *,
     verbose: bool | None = None,
+    tokens_per_second: float | None = None,
 ) -> Panel:
     """Render a tool invocation and its result together at terminal width."""
     if level.startswith("blocked:"):
@@ -572,6 +665,15 @@ def tool_result_panel(
         panel_content,
         title=f"⚡ {tool}",
         title_align="left",
+        subtitle=(
+            Text(
+                f"~{tokens_per_second:.1f} tok/s",
+                style=f"dim {THEME['dim']}",
+            )
+            if tokens_per_second is not None
+            else None
+        ),
+        subtitle_align="right",
         border_style=color,
         style=tool_style,
         padding=(0, 1),
@@ -587,9 +689,18 @@ def show_tool_result(
     result: str,
     *,
     verbose: bool | None = None,
+    tokens_per_second: float | None = None,
 ) -> None:
     console.print(
-        tool_result_panel(tool, args, cmd, level, result, verbose=verbose)
+        tool_result_panel(
+            tool,
+            args,
+            cmd,
+            level,
+            result,
+            verbose=verbose,
+            tokens_per_second=tokens_per_second,
+        )
     )
 
 
@@ -609,32 +720,100 @@ def approve(desc: str, cmd: str, level: str) -> bool:
     return ans.strip().lower() in ("y", "yes")
 
 
+def _is_server_status_request(messages: list[dict]) -> bool:
+    for message in reversed(messages):
+        content = message.get("content", "")
+        if (
+            message.get("role") == "user"
+            and isinstance(content, str)
+            and not content.startswith(_INTERNAL_USER_PREFIXES)
+        ):
+            return bool(re.search(
+                r"\b(?:server|host|node)\b.{0,48}\b(?:status|report)\b"
+                r"|\b(?:status|report)\b.{0,48}\b(?:server|host|node)\b",
+                content,
+                re.IGNORECASE,
+            ))
+    return False
+
+
+def _is_tool_capability_refusal(answer: str) -> bool:
+    return bool(re.search(
+        r"\b(?:unable|cannot|can't|not able)\b.{0,80}"
+        r"\b(?:provide|access|check|run|inspect|status|report|capabilit\w*)\b"
+        r"|\bcapabilit\w*\b.{0,80}\b(?:limited|specific|unable|cannot)\b",
+        answer,
+        re.IGNORECASE | re.DOTALL,
+    ))
+
+
 # ─────────────────────────────────────────────────────────────
 # Agent loop
 # ─────────────────────────────────────────────────────────────
 def run_turn(cfg: Config, messages: list[dict]) -> str | None:
     seen: dict[tuple[str, str], str] = {}
+    repeated_tool_calls: set[tuple[str, str]] = set()
+    status_refusal_retried = False
     for step in range(1, cfg.max_steps + 1):
         compact_messages(messages, cfg)
         if step >= cfg.max_steps - 1:
             messages.append({"role": "user", "content":
                 'Stop calling tools. Reply now with {"answer": "..."}.'})
 
-        reply = stream_turn(cfg, messages)
+        reply, tokens_per_second = stream_turn(cfg, messages)
         if not reply:
             return None
         action = parse_action(reply)
         if action is None:
-            messages.append({"role": "assistant", "content": reply})
-            messages.append({"role": "user", "content":
-                "Reply with exactly one JSON object."})
-            continue
+            answer = reply.strip()
+            print_chat_message(
+                "◆ Agent",
+                answer,
+                "agent_fg",
+                "agent_bg",
+                tokens_per_second,
+            )
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(
+                    {"answer": answer},
+                    ensure_ascii=False,
+                ),
+                "tokens_per_second": tokens_per_second,
+            })
+            return answer
 
-        if "tool" in action and action["tool"] in TOOL_IMPLS:
+        if (
+            "answer" not in action
+            and "tool" in action
+            and action["tool"] in TOOL_IMPLS
+        ):
             tool = action["tool"]
             args = action.get("arguments") or {}
             key = (tool, json.dumps(args, sort_keys=True, default=str))
             if key in seen:
+                if key in repeated_tool_calls:
+                    answer = (
+                        "I couldn't complete the request because the model "
+                        "repeated the same tool call instead of using its result."
+                    )
+                    print_chat_message(
+                        "◆ Agent",
+                        answer,
+                        "agent_fg",
+                        "agent_bg",
+                        tokens_per_second,
+                    )
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {"answer": answer},
+                            ensure_ascii=False,
+                        ),
+                        "tokens_per_second": tokens_per_second,
+                    })
+                    return answer
+                repeated_tool_calls.add(key)
                 messages.append({"role": "assistant", "content": reply})
                 messages.append({"role": "user", "content":
                     f"This exact tool call already ran. Its result was:\n"
@@ -683,16 +862,58 @@ def run_turn(cfg: Config, messages: list[dict]) -> str | None:
 
             _last_tool.clear()
             _last_tool.update(tool=tool, args=args, result=result)
-            show_tool_result(tool, args, cmd, level, result)
+            show_tool_result(
+                tool,
+                args,
+                cmd,
+                level,
+                result,
+                tokens_per_second=tokens_per_second,
+            )
 
-            messages.append({"role": "assistant", "content": reply})
+            messages.append({
+                "role": "assistant",
+                "content": reply,
+                "tokens_per_second": tokens_per_second,
+            })
             messages.append({"role": "user",
                              "content": f"[tool {tool} result]\n{result}"})
             continue
 
         if "answer" in action:
-            messages.append({"role": "assistant", "content": reply})
-            return str(action["answer"])
+            answer = _answer_text(action["answer"])
+            if (
+                not status_refusal_retried
+                and _is_server_status_request(messages)
+                and _is_tool_capability_refusal(answer)
+            ):
+                status_refusal_retried = True
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"answer": answer},
+                        ensure_ascii=False,
+                    ),
+                    "tokens_per_second": tokens_per_second,
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "That refusal is incorrect. You can provide a server "
+                        "status report using the available node_status tool. "
+                        'Call {"tool":"node_status","arguments":{}} now.'
+                    ),
+                })
+                continue
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(
+                    {"answer": answer},
+                    ensure_ascii=False,
+                ),
+                "tokens_per_second": tokens_per_second,
+            })
+            return answer
 
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content":
@@ -1232,8 +1453,8 @@ def show_saved_transcript(messages: list[dict]) -> None:
     """Display stored conversation turns without replaying tools or model calls."""
     _last_tool.clear()
     displayed = 0
-    pending_tool: tuple[str, dict, str, str] | None = None
-    for message in messages:
+    pending_tool: tuple[str, dict, str, str, float | None] | None = None
+    for index, message in enumerate(messages):
         role = message.get("role")
         content = message.get("content", "")
         if role == "system" or not isinstance(content, str):
@@ -1245,11 +1466,17 @@ def show_saved_transcript(messages: list[dict]) -> None:
                 tool_name = label.removeprefix("[tool ").removesuffix(" result")
                 _last_tool.update(tool=tool_name, args={}, result=result)
                 if pending_tool and pending_tool[0] == tool_name:
-                    _, args, command, level = pending_tool
+                    _, args, command, level, tokens_per_second = pending_tool
                 else:
                     args, command, level = {}, "", "safe"
+                    tokens_per_second = None
                 show_tool_result(
-                    tool_name, args, command, level, result
+                    tool_name,
+                    args,
+                    command,
+                    level,
+                    result,
+                    tokens_per_second=tokens_per_second,
                 )
                 pending_tool = None
             elif not content.startswith(_INTERNAL_USER_PREFIXES):
@@ -1260,21 +1487,53 @@ def show_saved_transcript(messages: list[dict]) -> None:
             continue
 
         if role == "assistant":
+            if message.get("internal") is True:
+                continue
+            tokens_per_second = message.get("tokens_per_second")
+            if not isinstance(tokens_per_second, (int, float)):
+                tokens_per_second = None
             action = parse_action(content)
+            next_message = messages[index + 1] if index + 1 < len(messages) else {}
+            next_content = next_message.get("content", "")
+            if (
+                action is None
+                and next_message.get("role") == "user"
+                and isinstance(next_content, str)
+                and next_content.startswith(
+                    ("Reply with exactly one JSON", "Stop calling tools.")
+                )
+            ):
+                continue
             if action and isinstance(action.get("tool"), str):
                 tool = action["tool"]
                 args = action.get("arguments") or {}
                 if isinstance(args, dict):
                     desc, command, level = _preview(tool, args)
-                    pending_tool = (tool, args, command, level)
+                    pending_tool = (
+                        tool,
+                        args,
+                        command,
+                        level,
+                        tokens_per_second,
+                    )
                     continue
             elif action and isinstance(action.get("answer"), str):
                 print_chat_message(
-                    "◆ Agent", action["answer"], "agent_fg", "agent_bg"
+                    "◆ Agent",
+                    action["answer"],
+                    "agent_fg",
+                    "agent_bg",
+                    tokens_per_second,
                 )
                 displayed += 1
             elif not action:
-                print_chat_message("◆ Agent", content, "agent_fg", "agent_bg")
+                print_chat_message(
+                    "◆ Agent",
+                    content,
+                    "agent_fg",
+                    "agent_bg",
+                    tokens_per_second,
+                )
                 displayed += 1
 
     if displayed:

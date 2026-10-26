@@ -22,9 +22,19 @@ over SSH — with your model and connection settings kept on your machine.
 - A GGUF model compatible with `llama.cpp` and its chat template
 - Enough system RAM and/or GPU memory for the model and its configured context
 
-The hardware tuner provides estimates, not guarantees. Large context settings
-can still exceed available memory; begin with the conservative defaults and
-adjust using the setup wizard.
+The hardware tuner estimates memory fit and can benchmark CPU-only, partial,
+and full GPU offload across CPU-thread counts. It compares the median of three
+chat decode runs after a warm-up, preserving the configured model, context
+length, and KV-cache type. It uses the model's native GGUF chat template when
+`server.chat_format = "auto"`, disables thinking where supported, and matches
+PVE-Chat's JSON-instruction prompt without enabling slow grammar-constrained
+decoding. Batch settings stay fixed, so this tunes generated-token throughput
+rather than prompt-processing speed. Estimates are not guarantees, and large
+contexts can still exceed available memory. The
+tuner reads NVIDIA GPU memory using `nvidia-smi`, AMD GPU memory from Linux
+DRM data or the Windows graphics API, and system RAM. Detecting GPU memory
+does not install or verify an accelerated `llama.cpp` backend; GPU offload
+requires a build compatible with your GPU and drivers.
 
 ## Install
 
@@ -43,6 +53,25 @@ accelerated backends, follow the installation instructions for
 [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) and select a
 wheel/build matching your hardware before installing the remaining
 requirements. The default pip installation does not guarantee GPU acceleration.
+
+For an AMD GPU on Windows, install the Vulkan-enabled wheel after the regular
+requirements. Use the same Python interpreter that runs PVE-Chat:
+
+```powershell
+python -m pip install --force-reinstall --only-binary=:all: --no-deps `
+  --index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan `
+  llama-cpp-python==0.3.36
+```
+
+Set `server.n_gpu_layers = -1` in `config.toml` to offload all model layers.
+Verify the selected Python environment reports GPU offload support:
+
+```powershell
+python -c "from llama_cpp import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
+```
+
+The command should print `True`. Restart PVE-Chat after changing the package
+or configuration; a running process keeps the backend it loaded at startup.
 
 The setup wizard asks for a model path and connection settings, detects
 available hardware, and can recommend server settings. It does not connect to

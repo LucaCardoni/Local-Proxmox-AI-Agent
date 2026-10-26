@@ -74,7 +74,7 @@ def main(argv=None) -> int:
             f"(n_ctx={n_ctx}, type={kv_type_name})\n"
             f"[LLAMA] Total VRAM needed: {total_vram_mib:,.0f} MiB "
             f"(model {server['model_vram_mib']} MiB + KV)\n"
-            "[LLAMA] GPU VRAM available: check with `nvidia-smi`. "
+            "[LLAMA] GPU VRAM available: check with your GPU's monitoring tools. "
             "Server will start, but OOM may occur if your GPU is tighter than the test box."
         )
 
@@ -95,7 +95,10 @@ def main(argv=None) -> int:
         # an n_ctx × vocabulary float32 scores array. At 131k context this can
         # require tens of GiB. Chat completions only need the latest logits.
         logits_all=False,
-        chat_format=server["chat_format"],
+        chat_format=(
+            None if server["chat_format"] == "auto" else server["chat_format"]
+        ),
+        chat_template_kwargs={"enable_thinking": False},
         host=server["host"],
         port=server["port"],
     )

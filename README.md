@@ -17,7 +17,7 @@ over SSH — with your model and connection settings kept on your machine.
 
 ## Requirements
 
-- Linux with Python 3.11 or newer
+- Python 3.11 or newer on Linux or Windows
 - SSH access to a Proxmox VE host, preferably using SSH keys
 - A GGUF model compatible with `llama.cpp` and its chat template
 - Enough system RAM and/or GPU memory for the model and its configured context
@@ -62,6 +62,10 @@ python -m pip install --force-reinstall --only-binary=:all: --no-deps `
   --index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan `
   llama-cpp-python==0.3.36
 ```
+
+The requirements file accepts any `llama-cpp-python` release from 0.3.35 up to
+0.4; the Vulkan command above pins 0.3.36 because that is the newest build in
+that wheel index.
 
 Set `server.n_gpu_layers = -1` in `config.toml` to offload all model layers.
 Verify the selected Python environment reports GPU offload support:
@@ -109,6 +113,12 @@ so you can see what the assistant asked Proxmox to do:
   <img src="./screenshots/chat-example.jpg" alt="A PVE-Chat conversation showing Proxmox container tool calls and results" width="90%">
 </p>
 
+For common read-only diagnostics, the agent has dedicated tools for ZFS pool
+and dataset health, failed systemd services, network interfaces and routes,
+and recent Proxmox tasks. You can ask for a task's status by providing its
+node name and UPID. Other host checks remain available through the `shell`
+tool.
+
 The server's default endpoint is `http://127.0.0.1:8080/v1`; chat completions
 use `/chat/completions`. For example, while the API server is running:
 
@@ -126,17 +136,26 @@ network.
 - Proxmox access uses the configured SSH host and user. Configure SSH keys and
   verify the host key before use; `StrictHostKeyChecking = "yes"` is the sample
   default.
-- With the sample config, the agent displays ordinary proposed commands and
-  asks before running them. Commands classified as dangerous require you to
-  type `yes`; `--yes` only skips approval for safe commands.
+- The command-line agent asks before running any command; dangerous commands
+  require you to type `yes`, and `--yes` only skips approval for safe commands.
+- The terminal chat prompts only for tools it does not classify as read-only.
+  Read-only commands are those on the allowlist in `classify()`
+  ([`pve_agent.py`](./pve_agent.py)); anything unrecognised, any redirection,
+  and any state-changing argument is treated as dangerous. Because read-only
+  tools never prompt in the chat, `--yes` and `agent.auto_confirm_safe` only
+  affect the command-line agent.
 - The command classifier is a safeguard, not a security boundary. Review
   commands before approving them, and use SSH permissions appropriate to the
   tasks you intend to perform.
 - The API server has no authentication. Keep it on loopback unless you have
   secured access another way.
-- Local config, chat history, agent memory, logs, model files, and Python
-  environments are excluded from Git. Chat and memory files are stored under
-  `.pve-chat/`.
+- Local config, chat history, agent memory, logs, exported session files,
+  model files, and Python environments are excluded from Git. Chat and memory
+  files are stored under `.pve-chat/`; `/save` writes an owner-only
+  `pve-chat-session.json`, and `/load` keeps your local system prompt instead
+  of trusting the file's.
+- Persistent memory is updated only when you explicitly ask the assistant to
+  remember something; ordinary replies do not trigger an extra model request.
 
 ## Configuration
 
@@ -166,7 +185,8 @@ virtual environment and install the lightweight test dependencies:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pytest rich prompt-toolkit
+python -m pip install -r requirements-dev.txt
+python -m pyflakes main.py pve-chat.py pve_agent.py pve_config.py serve.py setup_config.py hardware_tuning.py tests
 python -m pytest -q
 ```
 

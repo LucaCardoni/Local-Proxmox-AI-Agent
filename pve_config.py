@@ -36,8 +36,6 @@ SCHEMA: dict[str, dict[str, type]] = {
         "context_reserve": int,
         "context_detection_timeout": int,
         "max_tool_chars": int,
-        "memory_min_tokens": int,
-        "memory_max_tokens": int,
     },
     "server": {
         "model_path": str,
@@ -55,6 +53,42 @@ SCHEMA: dict[str, dict[str, type]] = {
         "model_vram_mib": int,
         "embedding_size_estimate": int,
     },
+}
+
+# Settings that older config files may still contain. They are accepted but
+# dropped on load so existing configs keep working and a wizard round-trip
+# cleans them up.
+DEPRECATED_KEYS = {
+    ("chat", "memory_min_tokens"),
+    ("chat", "memory_max_tokens"),
+}
+
+# Bounds that a hand-edited config can easily violate.
+MINIMUMS = {
+    ("llm", "temperature"): 0.0,
+    ("llm", "request_timeout"): 1,
+    ("ssh", "timeout"): 1,
+    ("ssh", "connect_timeout"): 1,
+    ("agent", "max_steps"): 1,
+    ("agent", "max_tokens"): 1,
+    ("chat", "max_tokens"): 1,
+    ("chat", "context_tokens"): 1024,
+    ("chat", "context_reserve"): 0,
+    ("chat", "context_detection_timeout"): 1,
+    ("chat", "max_tool_chars"): 512,
+    ("server", "port"): 1,
+    ("server", "n_ctx"): 1024,
+    ("server", "n_batch"): 1,
+    ("server", "n_ubatch"): 1,
+    ("server", "n_threads"): 1,
+    ("server", "n_threads_batch"): 1,
+    ("server", "n_gpu_layers"): -1,
+    ("server", "model_vram_mib"): 0,
+    ("server", "embedding_size_estimate"): 1,
+}
+MAXIMUMS = {
+    ("llm", "temperature"): 2.0,
+    ("server", "port"): 65535,
 }
 
 ENV_OVERRIDES = {
@@ -97,10 +131,21 @@ def _validate_settings(values: dict[str, Any]) -> None:
                 raise ValueError(
                     f"invalid value for {section}.{key}: expected {expected.__name__}"
                 )
-        unknown = options.keys() - schema.keys()
+        deprecated = {key for name, key in DEPRECATED_KEYS if name == section}
+        unknown = options.keys() - schema.keys() - deprecated
         if unknown:
             raise ValueError(
                 f"unknown configuration setting: {section}.{sorted(unknown)[0]}"
+            )
+    for (section, key), minimum in MINIMUMS.items():
+        if key in values[section] and values[section][key] < minimum:
+            raise ValueError(
+                f"invalid value for {section}.{key}: must be at least {minimum:g}"
+            )
+    for (section, key), maximum in MAXIMUMS.items():
+        if key in values[section] and values[section][key] > maximum:
+            raise ValueError(
+                f"invalid value for {section}.{key}: must be at most {maximum:g}"
             )
 
 
@@ -124,6 +169,8 @@ def load_settings(
         raise ValueError(f"invalid TOML in {path}: {exc}") from exc
 
     _validate_settings(values)
+    for section, key in DEPRECATED_KEYS:
+        values.get(section, {}).pop(key, None)
     if apply_env_overrides:
         for name, (section, key, converter) in ENV_OVERRIDES.items():
             if name in os.environ:

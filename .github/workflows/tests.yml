@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -12,9 +19,17 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      - name: Check for accidentally tracked local files
+        run: |
+          if git ls-files | grep -Eq '(^|/)(config\.toml|serve\.log|pve-chat-session\.json)$|\.gguf$|^\.pve-chat/'; then
+            echo "Local-only files must not be tracked: config.toml, *.gguf," >&2
+            echo "serve.log, pve-chat-session.json, or .pve-chat/" >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install pytest rich prompt-toolkit
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pyflakes main.py pve-chat.py pve_agent.py pve_config.py serve.py setup_config.py hardware_tuning.py tests
       - run: python -m pytest
       - run: python -m compileall -q main.py pve-chat.py pve_agent.py pve_config.py serve.py setup_config.py hardware_tuning.py tests

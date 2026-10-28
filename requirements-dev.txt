@@ -1,1 +1,4 @@
 pytest>=8,<10
+pyflakes>=3,<5
+rich>=13.7,<16
+prompt-toolkit>=3.0.43,<4

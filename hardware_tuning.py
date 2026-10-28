@@ -528,7 +528,7 @@ def benchmark_thread_counts(
     try:
         base_chat_handler = (
             model.chat_handler
-            or model._chat_handlers.get(model.chat_format)
+            or getattr(model, "_chat_handlers", {}).get(model.chat_format)
             or llama_chat_format.get_chat_completion_handler(model.chat_format)
         )
 
@@ -698,7 +698,7 @@ def find_fastest_configuration(
                 thread_counts,
                 report=report,
             )
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
             report(
                 f"Speed test failed for {gpu_layers} GPU layers: {exc}"
             )
@@ -816,7 +816,7 @@ def tune_settings(
 
     try:
         metadata = scan_model_metadata(model_path)
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+    except (ImportError, OSError, RuntimeError, ValueError, AttributeError) as exc:
         report(f"Could not read model metadata: {exc}")
         return None
 
@@ -875,7 +875,7 @@ def tune_settings(
             except KeyboardInterrupt:
                 report("Speed search interrupted; config has not been changed.")
                 return None
-            except (OSError, RuntimeError, ValueError) as exc:
+            except (OSError, RuntimeError, ValueError, AttributeError) as exc:
                 report(f"Speed search failed: {exc}")
                 return None
             if fastest is None:

@@ -331,14 +331,6 @@ def configure(
             "Maximum tool-result characters", chat["max_tool_chars"],
             input_fn=input_fn, minimum=512,
         )
-        chat["memory_min_tokens"] = _ask_int(
-            "Minimum memory-update tokens", chat["memory_min_tokens"],
-            input_fn=input_fn, minimum=1,
-        )
-        chat["memory_max_tokens"] = _ask_int(
-            "Maximum memory-update tokens", chat["memory_max_tokens"],
-            input_fn=input_fn, minimum=1,
-        )
 
         _section("Advanced model-server settings")
         server["model_alias"] = _ask_text(
@@ -371,8 +363,6 @@ def configure(
             server["embedding_size_estimate"], input_fn=input_fn, minimum=1,
         )
 
-    if chat["memory_min_tokens"] > chat["memory_max_tokens"]:
-        raise ValueError("memory_min_tokens must not exceed memory_max_tokens")
     return result
 
 
@@ -467,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             _say("No changes saved.", style=MUTED)
             return 0
         write_config(config_path, content)
-    except (ValueError, OSError, EOFError, KeyboardInterrupt) as exc:
+    except (ValueError, OSError, EOFError, AttributeError, KeyboardInterrupt) as exc:
         if isinstance(exc, KeyboardInterrupt):
             _say("\nSetup cancelled; config was not changed.", style="yellow")
             return 130

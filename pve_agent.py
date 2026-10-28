@@ -42,8 +42,6 @@ class Config:
     ssh_strict_host_key_checking: str
     max_steps: int
     context_detection_timeout: int
-    memory_min_tokens: int
-    memory_max_tokens: int
     approval_granted: bool = False
     confirm: bool = True
     dry_run: bool = False
@@ -67,6 +65,7 @@ def ssh_run(cfg: Config, command: str) -> tuple[int, str, str]:
     ]
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL,
                            timeout=cfg.ssh_timeout)
     except subprocess.TimeoutExpired:
         return 124, "", f"ssh timed out after {cfg.ssh_timeout}s"
@@ -123,6 +122,85 @@ DANGEROUS = [
 ]
 
 
+# Commands that only inspect state. Anything outside these tables — and any
+# compound command, redirection, substitution, or mutating argument — is
+# treated as dangerous, so an unrecognised command prompts instead of running.
+READ_ONLY_COMMANDS = frozenset({
+    "cat", "tac", "head", "tail", "wc", "grep", "egrep", "fgrep", "zcat",
+    "stat", "file", "ls", "df", "du", "free", "uptime", "uname", "hostname",
+    "whoami", "id", "groups", "ps", "pidof", "pgrep", "dmesg", "journalctl",
+    "pveversion", "sensors", "lscpu", "lsblk", "lsusb", "lspci", "md5sum",
+    "sha256sum", "mountpoint", "ss", "nvidia-smi", "getent", "printenv",
+    "which", "command", "test", "true", "find",
+})
+
+READ_ONLY_ACTIONS = {
+    "systemctl": frozenset({"status", "is-active", "is-enabled", "is-failed",
+                            "show", "cat", "list-units", "list-unit-files",
+                            "list-timers", "list-sockets", "failed"}),
+    "pvesh": frozenset({"get"}),
+    "pvecm": frozenset({"status", "nodes", "list", "version"}),
+    "pvesm": frozenset({"status", "list"}),
+    "pct": frozenset({"list", "status", "config", "pending"}),
+    "qm": frozenset({"list", "status", "config", "pending"}),
+    "zpool": frozenset({"status", "list", "get", "history", "iostat"}),
+    "zfs": frozenset({"list", "get", "version"}),
+    "ip": frozenset({"a", "addr", "address", "r", "route", "rou"}),
+}
+
+# Arguments that change state even when the binary itself is read-only
+# (``find -delete``, ``date -s``, ``dmesg -C``, ``ip link set``, ...).
+MUTATING_ARGUMENTS = frozenset({
+    "set", "add", "del", "delete", "remove", "create", "destroy",
+    "flush", "change", "replace", "start", "stop", "restart", "reload",
+    "enable", "disable", "mask", "unmask", "install", "upgrade", "purge",
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+    "-fprint0", "-fprintf", "-fls", "-s", "-C", "--clear",
+    "--vacuum-size", "--vacuum-time", "--vacuum-files",
+})
+
+# Segments are split on shell operators. Quoted operators are split too, which
+# can only make a command look more dangerous than it is.
+SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|]")
+WRITE_REDIRECT = re.compile(r"(?<![<>])>{1,2}(?!&)")
+
+
+def _is_read_only(command: str) -> bool:
+    """Return True only for commands made entirely of state-inspecting parts."""
+    if "$(" in command or "`" in command or "<<" in command:
+        return False
+    if WRITE_REDIRECT.search(command):
+        return False
+    for raw_segment in SEGMENT_SPLIT.split(command):
+        segment = raw_segment.strip()
+        if not segment:
+            continue
+        tokens = segment.split()
+        name, arguments = tokens[0], tokens[1:]
+        allowed = READ_ONLY_ACTIONS.get(name)
+        if name not in READ_ONLY_COMMANDS and allowed is None:
+            return False
+        if any(
+            argument.split("=", 1)[0] in MUTATING_ARGUMENTS
+            for argument in arguments
+        ):
+            return False
+        if allowed is not None:
+            action = next(
+                (argument for argument in arguments if not argument.startswith("-")),
+                None,
+            )
+            if action is None:
+                # Flag-only forms such as `systemctl --failed --no-pager`.
+                if not any(
+                    argument.lstrip("-") in allowed for argument in arguments
+                ):
+                    return False
+            elif action not in allowed:
+                return False
+    return True
+
+
 def classify(command: str) -> str:
     for pat, label in BLOCKED:
         if re.search(pat, command):
@@ -130,7 +208,7 @@ def classify(command: str) -> str:
     for pat in DANGEROUS:
         if re.search(pat, command):
             return "dangerous"
-    return "safe"
+    return "safe" if _is_read_only(command) else "dangerous"
 
 
 def confirm(cfg: Config, desc: str, command: str, level: str) -> bool:
@@ -220,14 +298,46 @@ def _format_result(rc: int, out: str, err: str) -> str:
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
+# Command strings live in one place so the chat UI can show exactly what runs.
+LIST_GUESTS_COMMAND = "pvesh get /cluster/resources --type vm --output-format json"
+STORAGE_LIST_COMMAND = (
+    "pvesh get /cluster/resources --type storage --output-format json"
+)
+NODE_STATUS_COMMAND = "free -b; df -hT; uptime; pveversion"
+ZFS_HEALTH_COMMAND = "zpool status -x; zfs list -o name,used,avail,refer,mountpoint"
+FAILED_SERVICES_COMMAND = "systemctl --failed --no-pager"
+NETWORK_STATUS_COMMAND = "ip -brief address; ip route"
+TASK_LIST_COMMAND = (
+    "pvesh get /nodes --output-format json; then query each node's "
+    "/tasks endpoint"
+)
+GUEST_VERBS = {
+    "guest_start": "start",
+    "guest_stop": "shutdown",
+    "guest_status": "status",
+    "guest_config": "config",
+}
+
+
+def _guest_cli(kind: object) -> str:
+    return "qm" if kind == "qemu" else "pct"
+
+
+def _guest_command(tool: str, args: dict) -> str:
+    return f"{_guest_cli(args.get('type'))} {GUEST_VERBS[tool]} {int(args['vmid'])}"
+
+
+def _read_file_command(path: str) -> str:
+    """Quote the path so the remote shell can never interpret any of it."""
+    return f"cat -- {shlex.quote(path)}"
+
+
 def tool_list_guests(cfg: Config, _args: dict) -> str:
     if cfg.dry_run:
         return _run_and_format(
-            cfg, "List VMs and containers",
-            "pvesh get /cluster/resources --type vm --output-format json")
+            cfg, "List VMs and containers", LIST_GUESTS_COMMAND)
 
-    rc, out, err = ssh_run(
-        cfg, "pvesh get /cluster/resources --type vm --output-format json")
+    rc, out, err = ssh_run(cfg, LIST_GUESTS_COMMAND)
     if rc == 0 and out.strip().startswith(("[", "{")):
         try:
             data = json.loads(out)
@@ -254,23 +364,18 @@ def tool_list_guests(cfg: Config, _args: dict) -> str:
 
 
 def tool_guest_status(cfg: Config, args: dict) -> str:
-    vmid = int(args["vmid"])
-    kind = args.get("type", "lxc")
-    cli = "qm" if kind == "qemu" else "pct"
-    return _run_and_format(cfg, f"{cli} status {vmid}", f"{cli} status {vmid}")
+    command = _guest_command("guest_status", args)
+    return _run_and_format(cfg, command, command)
 
 
 def tool_guest_config(cfg: Config, args: dict) -> str:
-    vmid = int(args["vmid"])
-    kind = args.get("type", "lxc")
-    cli = "qm" if kind == "qemu" else "pct"
-    return _run_and_format(cfg, f"{cli} config {vmid}", f"{cli} config {vmid}")
+    command = _guest_command("guest_config", args)
+    return _run_and_format(cfg, command, command)
 
 
 def tool_node_status(cfg: Config, _args: dict) -> str:
     if cfg.dry_run:
-        return _run_and_format(
-            cfg, "Node status", "free -b; df -hT; uptime; pveversion")
+        return _run_and_format(cfg, "Node status", NODE_STATUS_COMMAND)
 
     result = {}
 
@@ -283,6 +388,8 @@ def tool_node_status(cfg: Config, _args: dict) -> str:
         if len(parts) >= 7:
             try:
                 total, _u, _f, _s, _bc, avail = (int(x) for x in parts[1:7])
+                if total <= 0:
+                    raise ValueError("reported total memory is zero")
                 result["memory"] = {
                     "total_gb":     round(total / 1e9, 2),
                     "used_gb":      round((total - avail) / 1e9, 2),
@@ -323,12 +430,9 @@ def _fmt_gb(n: float) -> float:
 
 def tool_storage_list(cfg: Config, _args: dict) -> str:
     if cfg.dry_run:
-        return _run_and_format(
-            cfg, "Storage pools",
-            "pvesh get /cluster/resources --type storage --output-format json")
+        return _run_and_format(cfg, "Storage pools", STORAGE_LIST_COMMAND)
 
-    rc, out, err = ssh_run(
-        cfg, "pvesh get /cluster/resources --type storage --output-format json")
+    rc, out, err = ssh_run(cfg, STORAGE_LIST_COMMAND)
     if rc != 0 or not out.strip().startswith(("[", "{")):
         rc, out, err = ssh_run(cfg, "pvesm status")
         rows = _table_to_rows(out)
@@ -361,19 +465,116 @@ def tool_storage_list(cfg: Config, _args: dict) -> str:
     return json.dumps(slim, indent=2) + f"\n[exit {rc}]"
 
 
+def tool_zfs_health(cfg: Config, _args: dict) -> str:
+    return _run_and_format(
+        cfg, "ZFS pool and dataset health", ZFS_HEALTH_COMMAND
+    )
+
+
+def tool_failed_services(cfg: Config, _args: dict) -> str:
+    return _run_and_format(
+        cfg, "Failed systemd services", FAILED_SERVICES_COMMAND
+    )
+
+
+def tool_network_status(cfg: Config, _args: dict) -> str:
+    return _run_and_format(
+        cfg, "Network interfaces and routes", NETWORK_STATUS_COMMAND
+    )
+
+
+def tool_task_list(cfg: Config, _args: dict) -> str:
+    nodes_command = "pvesh get /nodes --output-format json"
+    if cfg.dry_run:
+        return f"[dry-run] would run: {nodes_command}"
+
+    rc, out, err = ssh_run(cfg, nodes_command)
+    if rc != 0:
+        return _format_result(rc, out, err)
+    try:
+        nodes = json.loads(out)
+    except json.JSONDecodeError as exc:
+        return f"ERROR: could not parse Proxmox node list: {exc}\n{_format_result(rc, out, err)}"
+    if not isinstance(nodes, list):
+        return "ERROR: Proxmox node list was not a JSON array."
+
+    tasks: list[dict] = []
+    errors: dict[str, str] = {}
+    for item in nodes:
+        node = item.get("node") if isinstance(item, dict) else None
+        if not isinstance(node, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", node):
+            errors[str(node)] = "invalid node name in Proxmox node list"
+            continue
+        command = (
+            f"pvesh get /nodes/{node}/tasks --limit 20 --source all "
+            "--output-format json"
+        )
+        task_rc, task_out, task_err = ssh_run(cfg, command)
+        if task_rc != 0:
+            errors[node] = _format_result(task_rc, task_out, task_err)
+            continue
+        try:
+            node_tasks = json.loads(task_out)
+        except json.JSONDecodeError as exc:
+            errors[node] = f"could not parse task list: {exc}"
+            continue
+        if not isinstance(node_tasks, list):
+            errors[node] = "task list was not a JSON array"
+            continue
+        for task in node_tasks:
+            if isinstance(task, dict):
+                task.setdefault("node", node)
+                tasks.append(task)
+
+    def start_time(task: dict) -> int:
+        try:
+            return int(task.get("starttime", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    tasks.sort(key=start_time, reverse=True)
+    result = json.dumps(
+        {"tasks": tasks[:20], "errors": errors},
+        indent=2,
+    )
+    return f"{result}\n[exit {1 if errors else 0}]"
+
+
+def _task_status_command(args: dict) -> str:
+    node = args.get("node")
+    upid = args.get("upid")
+    if not isinstance(node, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", node):
+        raise ValueError("node must be a valid Proxmox node name")
+    if not isinstance(upid, str) or not re.fullmatch(
+        r"UPID:[A-Za-z0-9_.-]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+:"
+        r"[0-9A-Fa-f]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]*:"
+        r"[A-Za-z0-9_.!@-]+:",
+        upid,
+    ):
+        raise ValueError("upid must be a complete Proxmox UPID")
+    endpoint = shlex.quote(f"/nodes/{node}/tasks/{upid}/status")
+    return f"pvesh get {endpoint} --output-format json"
+
+
+def tool_task_status(cfg: Config, args: dict) -> str:
+    command = _task_status_command(args)
+    return _run_and_format(cfg, "Proxmox task status", command)
+
+
 def tool_guest_start(cfg: Config, args: dict) -> str:
     vmid = int(args["vmid"])
-    kind = args.get("type", "lxc")
-    cli = "qm" if kind == "qemu" else "pct"
-    return _run_and_format(cfg, f"Start {kind} {vmid}", f"{cli} start {vmid}")
+    return _run_and_format(
+        cfg, f"Start {args.get('type', 'lxc')} {vmid}",
+        _guest_command("guest_start", args)
+    )
 
 
 def tool_guest_stop(cfg: Config, args: dict) -> str:
     vmid = int(args["vmid"])
-    kind = args.get("type", "lxc")
-    cli = "qm" if kind == "qemu" else "pct"
-    return _run_and_format(cfg, f"Stop {kind} {vmid}",
-                           f"{cli} shutdown {vmid}")
+    return _run_and_format(
+        cfg, f"Stop {args.get('type', 'lxc')} {vmid}",
+        _guest_command("guest_stop", args)
+    )
 
 
 def tool_guest_exec(cfg: Config, args: dict) -> str:
@@ -389,10 +590,8 @@ def tool_shell(cfg: Config, args: dict) -> str:
 
 
 def tool_read_file(cfg: Config, args: dict) -> str:
-    path = args["path"]
-    cmd = (f"test -f {shlex.quote(path)} && cat {shlex.quote(path)} || "
-           f"echo 'not a file: {path}'")
-    return _run_and_format(cfg, f"Read {path}", cmd, level="safe")
+    path = str(args["path"])
+    return _run_and_format(cfg, f"Read {path}", _read_file_command(path))
 
 
 def _run_and_format(cfg: Config, desc: str, command: str,
@@ -404,12 +603,59 @@ def _run_and_format(cfg: Config, desc: str, command: str,
     return _format_result(rc, out, err)
 
 
+def describe_tool(tool: str, args: dict) -> tuple[str, str, str]:
+    """Return (description, command, safety level) for one tool call.
+
+    The chat UI uses this to show exactly what will run, so the strings here
+    and in the tool implementations come from the same helpers and constants.
+    """
+    if tool == "shell":
+        command = str(args.get("command", ""))
+        return command[:80], command, classify(command)
+    if tool == "guest_exec":
+        vmid = int(args["vmid"])
+        inner = str(args["command"])
+        command = f"pct exec {vmid} -- bash -lc {shlex.quote(inner)}"
+        return f"exec in CT {vmid}", command, classify(inner)
+    if tool in GUEST_VERBS:
+        command = _guest_command(tool, args)
+        verb = GUEST_VERBS[tool]
+        level = "dangerous" if verb in ("start", "shutdown") else "safe"
+        return f"{verb} {int(args['vmid'])}", command, level
+    if tool == "list_guests":
+        return "list guests", LIST_GUESTS_COMMAND, "safe"
+    if tool == "storage_list":
+        return "storage pools", STORAGE_LIST_COMMAND, "safe"
+    if tool == "node_status":
+        return "node status", NODE_STATUS_COMMAND, "safe"
+    if tool == "zfs_health":
+        return "ZFS pool and dataset health", ZFS_HEALTH_COMMAND, "safe"
+    if tool == "failed_services":
+        return "failed systemd services", FAILED_SERVICES_COMMAND, "safe"
+    if tool == "network_status":
+        return "network interfaces and routes", NETWORK_STATUS_COMMAND, "safe"
+    if tool == "task_list":
+        return "recent Proxmox tasks", TASK_LIST_COMMAND, "safe"
+    if tool == "task_status":
+        return "Proxmox task status", _task_status_command(args), "safe"
+    if tool == "read_file":
+        path = str(args.get("path", ""))
+        command = _read_file_command(path)
+        return f"read {path}", command, classify(command)
+    raise KeyError(f"unknown tool: {tool}")
+
+
 TOOL_IMPLS = {
     "list_guests":    tool_list_guests,
     "guest_status":   tool_guest_status,
     "guest_config":   tool_guest_config,
     "node_status":    tool_node_status,
     "storage_list":   tool_storage_list,
+    "zfs_health":     tool_zfs_health,
+    "failed_services": tool_failed_services,
+    "network_status": tool_network_status,
+    "task_list":      tool_task_list,
+    "task_status":    tool_task_status,
     "guest_start":    tool_guest_start,
     "guest_stop":     tool_guest_stop,
     "guest_exec":     tool_guest_exec,
@@ -423,6 +669,11 @@ TOOL_SCHEMA = textwrap.dedent("""\
     - guest_config       {"vmid": int, "type": "qemu"|"lxc"}  → full config
     - node_status        {}                                   → RAM, disk, uptime (JSON)
     - storage_list       {}                                   → storage pools + usage (JSON)
+    - zfs_health         {}                                   → ZFS pool and dataset status
+    - failed_services    {}                                   → failed systemd services
+    - network_status     {}                                   → network interfaces and routes
+    - task_list          {}                                   → latest 20 Proxmox tasks
+    - task_status        {"node": str, "upid": str}            → Proxmox task state and exit status
     - guest_start        {"vmid": int, "type": "qemu"|"lxc"}
     - guest_stop         {"vmid": int, "type": "qemu"|"lxc"}  → clean shutdown
     - guest_exec         {"vmid": int, "command": str}        → run inside LXC
@@ -446,12 +697,16 @@ Reply with EXACTLY ONE JSON object, nothing else:
   Tool call:  {{"tool": "<name>", "arguments": {{...}}}}
   Finished:   {{"answer": "<short reply>"}}
 
-For general tasks (install, services, logs, diagnostics), use `shell`.
+For general tasks (install, logs, and diagnostics without a matching tool),
+use `shell`.
 `shell` runs on the Proxmox host as {cfg.ssh_user} — be specific and cautious.
 For tasks INSIDE a container, use `guest_exec`.
 For specific queries, use the matching tool directly (for example
 `node_status`, `storage_list`, or `list_guests`). NEVER put a tool name
 inside a `shell` command; tool names are pve-agent actions, not host commands.
+For task status, first get a successful `task_list` result and copy both
+`node` and `upid` exactly from one task. If listing tasks fails or returns no
+tasks, do not call `task_status`; explain that status could not be checked.
 For a host report, call `node_status` as its own tool call. To add other
 details, make separate `shell` calls for actual host commands.
 A request for a full server, host, or node status report MUST call
@@ -481,7 +736,16 @@ User: how much disk are my storage pools using
 You: {{"tool": "storage_list", "arguments": {{}}}}
 
 User: are there failed services
-You: {{"tool": "shell", "arguments": {{"command": "systemctl --failed"}}}}
+You: {{"tool": "failed_services", "arguments": {{}}}}
+
+User: check ZFS health
+You: {{"tool": "zfs_health", "arguments": {{}}}}
+
+User: show network interfaces and routes
+You: {{"tool": "network_status", "arguments": {{}}}}
+
+User: show recent Proxmox tasks
+You: {{"tool": "task_list", "arguments": {{}}}}
 
 User: what kernel am I running
 You: {{"tool": "shell", "arguments": {{"command": "uname -r"}}}}
@@ -510,10 +774,12 @@ Rules:
 - Never invoke a listed tool by putting its name in a shell command.
 - Never call the same tool with the same arguments twice.
 - If a command was refused, report it; do not retry.
+- Never narrate internal reasoning. Only send a tool-call JSON object or a
+  concise user-facing answer.
 - When a tool returns used_gb / total_gb / used_pct, quote those numbers
   verbatim. Do NOT convert units or do arithmetic.
 - If the user asks for information about the host (RAM, disk, uptime,
-  kernel, services, files, processes), USE A TOOL. Never say "I can't
+  kernel, services, files, processes, ZFS, network, or Proxmox tasks), USE A TOOL. Never say "I can't
   check X" — the `shell` tool can run ANY command on the host.
 - Keep answers to 1-3 sentences.
 
@@ -568,10 +834,12 @@ def run_agent(cfg: Config, user_input: str) -> None:
         {"role": "user", "content": user_input},
     ]
     calls: list[tuple[str, str]] = []      # (tool, canonical args) history
+    asked_for_answer = False
 
     for step in range(1, cfg.max_steps + 1):
         # Force an answer near the end so we never spin forever.
-        if step >= cfg.max_steps - 1:
+        if step >= cfg.max_steps - 1 and not asked_for_answer:
+            asked_for_answer = True
             messages.append({"role": "user", "content":
                 'Stop calling tools. Reply now with '
                 '{"answer": "<best answer from what you already know>"}.'})
@@ -693,8 +961,6 @@ def main(argv=None) -> int:
         ssh_strict_host_key_checking=ssh["strict_host_key_checking"],
         max_steps=(a.max_steps if a.max_steps is not None else agent["max_steps"]),
         context_detection_timeout=settings["chat"]["context_detection_timeout"],
-        memory_min_tokens=settings["chat"]["memory_min_tokens"],
-        memory_max_tokens=settings["chat"]["memory_max_tokens"],
         confirm=not (a.yes or agent["auto_confirm_safe"]),
         dry_run=a.dry_run, verbose=a.verbose,
     )

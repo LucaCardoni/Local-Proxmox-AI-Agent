@@ -26,8 +26,6 @@ context_tokens = 8192
 context_reserve = 600
 context_detection_timeout = 2
 max_tool_chars = 6000
-memory_min_tokens = 300
-memory_max_tokens = 700
 
 [server]
 model_path = "models/model.gguf"

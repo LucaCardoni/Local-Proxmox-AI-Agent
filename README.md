@@ -176,6 +176,39 @@ that file directly, or use environment overrides such as `PVE_N_CTX` and
 - **GPU not detected or used:** check the backend-specific
   `llama-cpp-python` installation and the configured GPU layer count.
 
+## TODO
+
+Planned work, not yet implemented. Nothing in this list exists in the current
+release; it records the intended direction so the scope of each change is clear
+before it is written.
+
+- [ ] **Plan and act modes** — `/plan <request>` produces a reviewed, numbered
+  plan of tool calls without running anything; `/act` executes that plan through
+  the normal approval flow, and `/retry` asks for a fresh plan when the first one
+  is not what you wanted.
+- [ ] **Audit log and `/audit`** — append every tool call (arguments, exact
+  command, approval source, exit status, duration) to a JSONL file under
+  `.pve-chat/`, and show recent entries from the chat.
+- [ ] **Snapshot and backup tools** — list, create, and roll back guest
+  snapshots, and run and list `vzdump` backups, with the writing operations
+  behind the normal approval prompt.
+- [ ] **Schema-constrained tool calls** — send a JSON schema that enumerates the
+  valid tool names and their argument shapes, so a malformed tool call is
+  rejected during generation instead of after it.
+- [ ] **Compound host overview tool** — return node, storage, guest, and failed
+  service state in one call and one SSH round trip, instead of spending several
+  model steps collecting them separately.
+- [ ] **Post-mutation verification** — after a start, stop, or rollback, re-read
+  the guest state and report what actually happened rather than trusting the
+  command's exit code.
+- [ ] **Local retrieval over logs and documentation** — index a documentation
+  folder and recent journal output with the local model's embeddings endpoint,
+  with a lexical fallback when embeddings are unavailable.
+- [ ] **Redaction before context** — strip keys, passwords, and tokens from tool
+  output before it reaches the model, the saved transcript, and the audit log.
+- [ ] **Multiple SSH targets** — let one config describe several Proxmox hosts
+  and let a tool call name which one it runs against.
+
 ## Development
 
 The automated tests are part of the repository and run in GitHub Actions for
